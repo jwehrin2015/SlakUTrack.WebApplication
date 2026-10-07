@@ -1,0 +1,106 @@
+name: Build, test, and release
+
+on:
+  push:
+    branches:
+      - '**'
+    tags:
+      - 'v*'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: client
+
+      - name: Test frontend
+        run: npm test
+        working-directory: client
+
+      - name: Lint frontend
+        run: npm run lint
+        working-directory: client
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: client
+
+      - name: Test .NET solution
+        run: dotnet test SlakUTrack.sln --configuration Release
+
+      - name: Publish application
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: dotnet publish SlakUTrack.WebApplication.csproj --configuration Release --no-restore --output artifacts/package/app -p:UseAppHost=false
+
+      - name: Include run instructions
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          cp README.md artifacts/package/README.md
+          cat > artifacts/package/RUN.txt <<'EOF'
+          SLAK-U-Track Web
+
+          Requires the .NET 10 ASP.NET Core Runtime.
+          Start the app with:
+
+            dotnet SlakUTrack.WebApplication.dll
+
+          Then open the local URL printed by the application.
+          Set SLAKUTRACK_DB_PATH to use a specific SQLite database file.
+          EOF
+
+      - name: Package release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          cd artifacts/package
+          zip -qr "$GITHUB_WORKSPACE/artifacts/SLAK-U-Track-${GITHUB_REF_NAME}.zip" .
+
+      - name: Upload release package
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: SLAK-U-Track-${{ github.ref_name }}
+          path: artifacts/SLAK-U-Track-${{ github.ref_name }}.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release package
+        uses: actions/download-artifact@v4
+        with:
+          name: SLAK-U-Track-${{ github.ref_name }}
+          path: release
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release/*.zip --generate-notes
